@@ -1,6 +1,6 @@
-﻿using System;
-using System.Diagnostics;
-using System.IO;
+﻿using System.Drawing;
+using System.Drawing.Imaging;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using iText.Kernel.Pdf;
 using iText.Kernel.Pdf.Canvas.Parser;
@@ -11,6 +11,7 @@ namespace PdfImageExtractor;
 
 class Program
 {
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", "CA1416:Validate platform compatibility", Justification = "This application only supports Windows.")]
     static void Main(string[] args)
     {
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -19,12 +20,19 @@ class Program
             return;
         }
 
+        var supportedFormats = typeof (ImageFormat).GetProperties(BindingFlags.Public | BindingFlags.Static).Where(p => p.PropertyType == typeof(ImageFormat)).OrderBy(p => p.Name).ToList();
+
         string? pdfPath = args.ElementAtOrDefault(0);
         string? outputDirectory = args.ElementAtOrDefault(1);
 
         if (string.IsNullOrWhiteSpace(pdfPath) || string.IsNullOrWhiteSpace(outputDirectory))
         {
-            Console.WriteLine("Usage: PdfImageExtractor <pathToPDF> <pathToFolderForImages>");
+            Console.WriteLine("");
+            Console.WriteLine("Usage: PdfImageExtractor <pathToPDF> <pathToFolderForImages> <imageFormat>");
+            Console.WriteLine("");
+            Console.WriteLine("The default imageFormat is Png.");
+            Console.WriteLine("Supported values are " + string.Join(", ", supportedFormats.Select(p => p.Name)));
+            Console.WriteLine("");
             return;
         }
 
@@ -40,13 +48,30 @@ class Program
             return;
         }
 
-        PdfDocument pdfDoc = new(new PdfReader(pdfPath));
-
-        for (int pageNumber = 1; pageNumber <= pdfDoc.GetNumberOfPages(); pageNumber++)
+        var imageFormat = ImageFormat.Png;
+        var imageFormatName = (args.ElementAtOrDefault(2) ?? "Png").Trim().ToLowerInvariant();
+        var requestedFormat = supportedFormats
+            .Where(p => p.Name.Equals(imageFormatName, StringComparison.OrdinalIgnoreCase))
+            .Select(p => p.GetValue(null) as ImageFormat)
+            .FirstOrDefault();
+        if (requestedFormat is not null)
         {
+            imageFormat = requestedFormat;
+        }
+
+        PdfDocument pdfDoc = new(new PdfReader(pdfPath));
+        var numPages = pdfDoc.GetNumberOfPages();
+        var numDigits = numPages.ToString().Length;
+        for (int pageNumber = 1; pageNumber <= numPages; pageNumber++)
+        {
+            var imageCount = 0;
             var page = pdfDoc.GetPage(pageNumber);
-            var strategy = new ImageRenderListener(outputDirectory);
-            PdfCanvasProcessor parser = new(strategy);
+            var imageRenderListener = new ImageRenderListener(outputDirectory, imageFormat, () =>
+            {
+                imageCount++;
+                return $"Page-{pageNumber.ToString().PadLeft(numDigits, '0')}-Image-{imageCount.ToString().PadLeft(3, '0')}.{imageFormatName}";
+            });
+            var parser = new PdfCanvasProcessor(imageRenderListener);
             parser.ProcessPageContent(page);
         }
 
@@ -56,7 +81,7 @@ class Program
 }
 
 [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", "CA1416:Validate platform compatibility", Justification = "This application only supports Windows.")]
-internal class ImageRenderListener(string outputDir) : IEventListener
+internal class ImageRenderListener(string outputDir, ImageFormat format, Func<string> getImageName) : IEventListener
 {
     private readonly string outputDir = outputDir;
 
@@ -68,10 +93,9 @@ internal class ImageRenderListener(string outputDir) : IEventListener
             var imageBytes = imageObject.GetImageBytes();
 
             using var imageStream = new MemoryStream(imageBytes);
-            using var image = System.Drawing.Image.FromStream(imageStream);
-            string fileName = $"image_{Guid.NewGuid()}.png";
-            string filePath = Path.Combine(outputDir, fileName);
-            image.Save(filePath, System.Drawing.Imaging.ImageFormat.Png);
+            using var image = Image.FromStream(imageStream);
+            string filePath = Path.Combine(outputDir, getImageName());
+            image.Save(filePath, format);
         }
     }
 
